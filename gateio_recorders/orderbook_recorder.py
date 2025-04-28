@@ -97,14 +97,21 @@ class OrderBookRecorder:
         print(f"[{self.contract}] WebSocket subscribed.")
 
     def start_ws(self):
-        self.ws = websocket.WebSocketApp(
-            self.ws_url,
-            on_open=self.on_open,
-            on_message=self.on_message,
-            on_error=self.on_error,
-            on_close=self.on_close
-        )
-        self.ws.run_forever(ping_interval=20, ping_timeout=10)
+        # Auto-reconnect websocket forever
+        while True:
+            self.ws = websocket.WebSocketApp(
+                self.ws_url,
+                on_open=self.on_open,
+                on_message=self.on_message,
+                on_error=self.on_error,
+                on_close=self.on_close
+            )
+            try:
+                self.ws.run_forever(ping_interval=20, ping_timeout=10)
+            except Exception as e:
+                print(f"[{self.contract}] WebSocket run_forever error: {e}")
+            print(f"[{self.contract}] WebSocket connection lost. Reconnecting in 5 seconds...")
+            time.sleep(1)
 
     def collect_orderbook_snapshot(self):
         now_ts = self.now_timestamp()
@@ -138,7 +145,7 @@ class OrderBookRecorder:
             snapshot[f"ask_group_{idx}_size"] = size
 
         self.snapshots.append(snapshot)
-    
+
     def flush_snapshots_to_csv(self, date_str):
         if not self.snapshots:
             return
@@ -152,29 +159,22 @@ class OrderBookRecorder:
 
         with open(file_path, "a", newline='', encoding="utf-8") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-
             if not file_exists:
                 writer.writeheader()
-
             for snapshot in self.snapshots:
                 writer.writerow(snapshot)
 
         print(f"[{self.contract}] Flushed {len(self.snapshots)} snapshots to file.")
         self.snapshots.clear()
-    
+
     def validate_orderbook_sync(self):
         try:
             url = f"{self.host_rest}{self.rest_prefix}/futures/{self.settle}/order_book"
-            params = {
-                "contract": self.contract,
-                "limit": 100,
-                "with_id": "true"
-            }
+            params = {"contract": self.contract, "limit": 100, "with_id": "true"}
             resp = requests.get(url, headers=self.headers, params=params, timeout=10)
             resp.raise_for_status()
             latest = resp.json()
 
-            # 把现有本地orderbook和最新orderbook都整理成dict
             with self.lock:
                 local_bids = self.orderbook["bids"]
                 local_asks = self.orderbook["asks"]
@@ -182,14 +182,6 @@ class OrderBookRecorder:
             fetched_bids = {float(bid["p"]): float(bid["s"]) for bid in latest["bids"]}
             fetched_asks = {float(ask["p"]): float(ask["s"]) for ask in latest["asks"]}
 
-            # 简单比较前20档
-            local_bid_prices = sorted(local_bids.keys(), reverse=True)[:20]
-            fetched_bid_prices = sorted(fetched_bids.keys(), reverse=True)[:20]
-
-            local_ask_prices = sorted(local_asks.keys())[:20]
-            fetched_ask_prices = sorted(fetched_asks.keys())[:20]
-
-            # 价格偏差率检测（比如价格差>0.1%就认为不同步）
             def price_diff_exceed(local_prices, fetched_prices, side_name):
                 if len(local_prices) == 0 or len(fetched_prices) == 0:
                     return True
@@ -199,7 +191,8 @@ class OrderBookRecorder:
                         return True
                 return False
 
-            if price_diff_exceed(local_bid_prices, fetched_bid_prices, "bid") or price_diff_exceed(local_ask_prices, fetched_ask_prices, "ask"):
+            if price_diff_exceed(sorted(local_bids.keys(), reverse=True)[:20], sorted(fetched_bids.keys(), reverse=True)[:20], "bid") or \
+               price_diff_exceed(sorted(local_asks.keys())[:20], sorted(fetched_asks.keys())[:20], "ask"):
                 print(f"[{self.contract}] Orderbook desynced. Refetching initial orderbook...")
                 self.fetch_initial_orderbook()
 
@@ -234,29 +227,29 @@ class OrderBookRecorder:
         current_date_str = datetime.fromtimestamp(self.now_timestamp(), timezone.utc).strftime("%Y-%m-%d")
 
         while True:
-            now_ts = self.now_timestamp()
-            date_str = datetime.fromtimestamp(now_ts, timezone.utc).strftime("%Y-%m-%d")
+            try:
+                now_ts = self.now_timestamp()
+                date_str = datetime.fromtimestamp(now_ts, timezone.utc).strftime("%Y-%m-%d")
 
-            # 检查日期是否变化，如果变化了，压缩昨天的文件
-            if date_str != current_date_str:
-                self.compress_csv_file(current_date_str)
-                current_date_str = date_str
+                if date_str != current_date_str:
+                    self.compress_csv_file(current_date_str)
+                    current_date_str = date_str
 
-            self.collect_orderbook_snapshot()
-            snapshot_counter += 1
+                self.collect_orderbook_snapshot()
+                snapshot_counter += 1
 
-            if snapshot_counter >= 60:
-                self.flush_snapshots_to_csv(date_str)
-                snapshot_counter = 0
+                if snapshot_counter >= 60:
+                    self.flush_snapshots_to_csv(date_str)
+                    snapshot_counter = 0
 
-            validate_counter += 1
-            if validate_counter >= 60:
-                self.validate_orderbook_sync()
-                validate_counter = 0
+                validate_counter += 1
+                if validate_counter >= 60:
+                    self.validate_orderbook_sync()
+                    validate_counter = 0
 
-            next_call = 1 - (time.time() % 1)
-            time.sleep(next_call)
+                next_call = 1 - (time.time() % 1)
+                time.sleep(next_call)
 
-
-
-
+            except Exception as e:
+                print(f"[{self.contract}] Main loop error: {e}")
+                time.sleep(1)  # Prevent high CPU usage on error

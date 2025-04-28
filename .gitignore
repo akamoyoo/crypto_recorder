@@ -1,3 +1,4 @@
 orderbook_data/
 klines_data/
-__pycache__/
+*/__pycache__/
+*/*_data/

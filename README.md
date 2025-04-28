@@ -1,6 +1,6 @@
 # Futures Data Recorder
 
-This project provides two modules to record real-time futures market data from Gate.io:
+This project provides two modules to record real-time futures market data from different exchanges:
 
 - **OrderBookRecorder**: Records high-frequency order book snapshots (bids and asks).
 - **KlineRecorder**: Records candlestick (kline) data at 1-second intervals.
